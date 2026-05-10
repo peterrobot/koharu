@@ -213,7 +213,8 @@ pub fn apply_patch(config: &mut AppConfig, patch: koharu_core::ConfigPatch) {
             config.http.max_retries = v;
         }
         if let Some(v) = http.huggingface_endpoint {
-            config.http.huggingface_endpoint = normalize_huggingface_endpoint(&v);
+            config.http.huggingface_endpoint =
+                v.as_deref().and_then(normalize_huggingface_endpoint);
         }
     }
     if let Some(p) = patch.pipeline {
@@ -490,7 +491,7 @@ mod tests {
             &mut config,
             ConfigPatch {
                 http: Some(HttpConfigPatch {
-                    huggingface_endpoint: Some(" https://hf-mirror.com/// ".to_string()),
+                    huggingface_endpoint: Some(Some(" https://hf-mirror.com/// ".to_string())),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -512,7 +513,7 @@ mod tests {
             &mut config,
             ConfigPatch {
                 http: Some(HttpConfigPatch {
-                    huggingface_endpoint: Some("   ".to_string()),
+                    huggingface_endpoint: Some(Some("   ".to_string())),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -520,5 +521,43 @@ mod tests {
         );
 
         assert_eq!(config.http.huggingface_endpoint, None);
+    }
+
+    #[test]
+    fn apply_patch_clears_huggingface_endpoint_with_null() {
+        let mut config = AppConfig::default();
+        config.http.huggingface_endpoint = Some("https://hf-mirror.com".to_string());
+
+        apply_patch(
+            &mut config,
+            ConfigPatch {
+                http: Some(HttpConfigPatch {
+                    huggingface_endpoint: Some(None),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(config.http.huggingface_endpoint, None);
+    }
+
+    #[test]
+    fn apply_patch_preserves_huggingface_endpoint_when_omitted() {
+        let mut config = AppConfig::default();
+        config.http.huggingface_endpoint = Some("https://hf-mirror.com".to_string());
+
+        apply_patch(
+            &mut config,
+            ConfigPatch {
+                http: Some(HttpConfigPatch::default()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            config.http.huggingface_endpoint.as_deref(),
+            Some("https://hf-mirror.com")
+        );
     }
 }

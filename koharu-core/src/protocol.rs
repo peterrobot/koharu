@@ -206,7 +206,18 @@ pub struct HttpConfigPatch {
     pub connect_timeout: Option<u64>,
     pub read_timeout: Option<u64>,
     pub max_retries: Option<u32>,
-    pub huggingface_endpoint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_patch_field")]
+    pub huggingface_endpoint: Option<Option<String>>,
+}
+
+fn deserialize_nullable_patch_field<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, ToSchema)]
@@ -229,4 +240,28 @@ pub struct ProviderPatch {
     pub base_url: Option<String>,
     /// `"[REDACTED]"` → keep existing keyring secret; empty → clear; otherwise save.
     pub api_key: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigPatch;
+
+    #[test]
+    fn config_patch_distinguishes_null_huggingface_endpoint_from_missing() {
+        let missing: ConfigPatch =
+            serde_json::from_str(r#"{"http":{}}"#).expect("missing field patch");
+        assert_eq!(missing.http.unwrap().huggingface_endpoint, None);
+
+        let null: ConfigPatch = serde_json::from_str(r#"{"http":{"huggingfaceEndpoint":null}}"#)
+            .expect("null field patch");
+        assert_eq!(null.http.unwrap().huggingface_endpoint, Some(None));
+
+        let value: ConfigPatch =
+            serde_json::from_str(r#"{"http":{"huggingfaceEndpoint":"https://hf-mirror.com"}}"#)
+                .expect("value field patch");
+        assert_eq!(
+            value.http.unwrap().huggingface_endpoint,
+            Some(Some("https://hf-mirror.com".to_string()))
+        );
+    }
 }
