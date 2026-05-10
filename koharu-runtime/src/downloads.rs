@@ -127,10 +127,13 @@ impl Downloads {
             tokio::fs::create_dir_all(parent).await.ok();
         }
         if !pointer_path.exists() {
-            #[cfg(target_os = "windows")]
-            std::os::windows::fs::symlink_file(&blob_path, &pointer_path).ok();
-            #[cfg(target_family = "unix")]
-            std::os::unix::fs::symlink(&blob_path, &pointer_path).ok();
+            materialize_cache_pointer(&blob_path, &pointer_path).with_context(|| {
+                format!(
+                    "failed to create HF cache pointer `{}` for `{}`",
+                    pointer_path.display(),
+                    blob_path.display()
+                )
+            })?;
         }
         cache_repo
             .create_ref(metadata.commit_hash())
@@ -377,6 +380,66 @@ fn part_path(destination: &Path) -> Result<PathBuf> {
     Ok(destination.with_file_name(format!("{}.part", file_name.to_string_lossy())))
 }
 
+fn materialize_cache_pointer(blob_path: &Path, pointer_path: &Path) -> Result<()> {
+    if pointer_path.try_exists()? {
+        return Ok(());
+    }
+
+    if let Some(parent) = pointer_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create HF pointer directory `{}`",
+                parent.display()
+            )
+        })?;
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(pointer_path)
+        && metadata.file_type().is_symlink()
+    {
+        std::fs::remove_file(pointer_path).with_context(|| {
+            format!(
+                "failed to remove stale HF cache pointer `{}`",
+                pointer_path.display()
+            )
+        })?;
+    }
+
+    if try_symlink_file(blob_path, pointer_path).is_ok() {
+        return Ok(());
+    }
+    if std::fs::hard_link(blob_path, pointer_path).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(blob_path, pointer_path).with_context(|| {
+        format!(
+            "failed to copy HF blob `{}` to pointer `{}`",
+            blob_path.display(),
+            pointer_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn try_symlink_file(blob_path: &Path, pointer_path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::os::windows::fs::symlink_file(blob_path, pointer_path)
+    }
+    #[cfg(target_family = "unix")]
+    {
+        std::os::unix::fs::symlink(blob_path, pointer_path)
+    }
+    #[cfg(not(any(target_os = "windows", target_family = "unix")))]
+    {
+        let _ = (blob_path, pointer_path);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "file symlinks are not supported on this platform",
+        ))
+    }
+}
+
 fn normalize_hf_endpoint(value: &str) -> Option<String> {
     let endpoint = value.trim().trim_end_matches('/');
 
@@ -401,7 +464,10 @@ fn hf_endpoint_from_sources(configured: Option<&str>, env: Option<&str>) -> Opti
 mod tests {
     use std::path::Path;
 
-    use super::{hf_endpoint_from_sources, normalize_hf_endpoint, part_path};
+    use super::{
+        Cache, Repo, RepoType, hf_endpoint_from_sources, materialize_cache_pointer,
+        normalize_hf_endpoint, part_path,
+    };
 
     #[test]
     fn partial_download_path_appends_suffix() {
@@ -441,5 +507,25 @@ mod tests {
             Some("https://env.example".to_string())
         );
         assert_eq!(hf_endpoint_from_sources(Some("   "), Some("   ")), None);
+    }
+
+    #[test]
+    fn materialize_cache_pointer_creates_nested_pointer_visible_to_hf_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_path_buf());
+        let repo = cache.repo(Repo::new("owner/model".to_string(), RepoType::Model));
+        let commit = "1234567890abcdef";
+        let filename = "nested/model.safetensors";
+        let blob = repo.blob_path("etag");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::fs::write(&blob, b"model").unwrap();
+
+        let pointer = repo.pointer_path(commit).join(filename);
+
+        materialize_cache_pointer(&blob, &pointer).unwrap();
+        repo.create_ref(commit).unwrap();
+
+        let cached = repo.get(filename).expect("cache lookup should see pointer");
+        assert_eq!(std::fs::read(cached).unwrap(), b"model");
     }
 }
